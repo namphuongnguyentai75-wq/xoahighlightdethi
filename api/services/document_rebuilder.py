@@ -92,13 +92,20 @@ def rebuild_docx(input_docx: str, output_docx: str, temp_dir: str):
             idx = parent.index(p_element)
             
             # Cứu phần câu hỏi (nếu có) nằm trước rác và trước đáp án
-            q_match = re.match(r'^(.*?)(?=\b[A-Da-d]\.\s*|Item\s*\d+\s*:|Commentato)', full_text, flags=re.IGNORECASE | re.DOTALL)
+            q_match = re.match(r'^(.*?)(?=\b[A-Da-d]\.\s*|(?:^|\s)(?:o||[\u2022\u25cf\u25cb\u25a0])\s+|Item\s*\d+\s*:|Commentato)', full_text, flags=re.IGNORECASE | re.DOTALL)
             if q_match and q_match.group(1).strip():
                 insert_clean_paragraph(parent, idx, q_match.group(1).strip(), doc.element.nsmap)
                 idx += 1
                 
             # Cứu các đáp án A, B, C, D bị kẹt trong đống rác (có tiền tố A, B, C, D)
-            ans_matches = re.findall(r'\b([A-Da-d])\.\s*(.*?)(?=\b[A-Da-d]\.\s*|Item\s*\d+\s*:|Commentato|Difficulty|Proportion|$)', full_text, flags=re.IGNORECASE)
+            ans_matches = re.findall(r'\b([A-Da-d])\.\s*(.*?)(?=\b[A-Da-d]\.\s*|(?:^|\s)(?:o||[\u2022\u25cf\u25cb\u25a0])\s+|Item\s*\d+\s*:|Commentato|Difficulty|Proportion|$)', full_text, flags=re.IGNORECASE)
+            
+            if not ans_matches:
+                bullet_matches = re.findall(r'(?:^|\s)(?:o||[\u2022\u25cf\u25cb\u25a0])\s+(.*?)(?=\s(?:o||[\u2022\u25cf\u25cb\u25a0])\s+|Item\s*\d+\s*:|Commentato|Difficulty|Proportion|$)', full_text, flags=re.IGNORECASE)
+                if 2 <= len(bullet_matches) <= 6:
+                    labels = ['A', 'B', 'C', 'D', 'E', 'F']
+                    ans_matches = [(labels[i], text) for i, text in enumerate(bullet_matches)]
+                    
             seen = set()
             for m in ans_matches:
                 ans_text = f"{m[0].upper()}. {m[1].strip()}"
@@ -409,17 +416,31 @@ def rebuild_pdf_to_docx(pdf_path: str, output_docx_path: str):
                             raw_text = raw_text[:item_idx.start()]
                             stop_block = True
                             
-                        segments = re.split(r'(?=(?:Câu|Bài|CÂU|BÀI)\s+\d+[:\.])|(?=\b[A-Da-d]\.)', raw_text)
+                        segments = re.split(r'(?=(?:Câu|Bài|CÂU|BÀI)\s+\d+[:\.])|(?=\b[A-Da-d]\.)|(?=(?:^|\s)(?:o||[\u2022\u25cf\u25cb\u25a0])\s+)', raw_text)
                         for seg in segments:
                             if not seg: continue
                             seg_strip = seg.strip()
-                            if re.match(r'^(Câu|Bài|CÂU|BÀI)\s+\d+[:\.]|^[A-Da-d]\.', seg_strip):
+                            
+                            is_question = re.match(r'^(Câu|Bài|CÂU|BÀI)\s+\d+[:\.]', seg_strip)
+                            is_bullet = re.match(r'^(?:o||[\u2022\u25cf\u25cb\u25a0])\s+', seg_strip)
+                            is_letter_ans = re.match(r'^[A-Da-d]\.', seg_strip)
+                            
+                            if is_question:
+                                current_p.ans_idx = 0
+                            
+                            if is_question or is_letter_ans or is_bullet:
                                 if len(current_p.runs) > 0:
                                     current_p = docx_doc.add_paragraph()
                                     current_p.paragraph_format.space_after = Pt(0)
                                     current_p.paragraph_format.space_before = Pt(0)
                                     current_p.paragraph_format.line_spacing = 0.95
-                                if re.match(r'^[A-Da-d]\.', seg_strip):
+                                    # Forward the counter to the new paragraph
+                                    if hasattr(docx_doc.paragraphs[-2], 'ans_idx'):
+                                        current_p.ans_idx = docx_doc.paragraphs[-2].ans_idx
+                                    else:
+                                        current_p.ans_idx = getattr(current_p, 'ans_idx', 0)
+                                
+                                if is_letter_ans or is_bullet:
                                     current_p.paragraph_format.left_indent = Inches(0.25)
                                 else:
                                     current_p.paragraph_format.left_indent = Inches(0)
@@ -427,6 +448,15 @@ def rebuild_pdf_to_docx(pdf_path: str, output_docx_path: str):
                             # Clean invalid XML control characters that cause Word to crash
                             safe_text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]', '', seg)
                             safe_text = fix_vietnamese_spacing(safe_text)
+                            
+                            # Replace bullet with A, B, C, D
+                            if is_bullet:
+                                ans_idx = getattr(current_p, 'ans_idx', 0)
+                                if ans_idx < 6:
+                                    labels = ['A', 'B', 'C', 'D', 'E', 'F']
+                                    safe_text = re.sub(r'^(?:\s*)(?:o||[\u2022\u25cf\u25cb\u25a0])\s+', f"{labels[ans_idx]}. ", safe_text, 1)
+                                    current_p.ans_idx = ans_idx + 1
+                                    
                             if not safe_text: continue
                             
                             run = current_p.add_run(safe_text)
